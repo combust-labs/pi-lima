@@ -1,0 +1,587 @@
+# krunkit is the VM backend.
+vmType: krunkit
+
+# Required for KVM inside this VM.
+nestedVirtualization: true
+
+arch: aarch64
+
+cpus: 8
+
+memory: "32GiB"
+
+disk: "100GiB"
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+param:
+  # MESA_VERSION: "23.3.6"
+  MESA_VERSION: "25.0.7"
+  NODE_VERSION: "25"
+  PI_REPOSITORY: "https://github.com/earendil-works/pi.git"
+  PI_VERSION: "v1.3.0"
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eu
+
+      # Allow apt-get build-dep to fetch Mesa's build requirements.
+      if [ -z "$(cat /etc/apt/sources.list.d/ubuntu.sources | grep -v '#' | grep deb-src)" ]; then
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+      fi
+
+      apt-get update
+
+      # install tools:
+      apt-get install -y \
+          ca-certificates \
+          curl \
+          git \
+          iproute2 \
+          iptables \
+          jq \
+          net-tools \
+          socat
+
+      # install build tools:
+      apt-get install -y \
+          bison \
+          cmake \
+          flex \
+          meson \
+          ninja-build \
+          pkg-config
+      
+      # install all python dependencies:
+      apt-get install -y \
+          python3 \
+          python3-mako \
+          python3-packaging \
+          python3-pip \
+          python3-yaml
+      
+      # install the browser:
+      apt-get install -y chromium 
+      if [ ! -f /usr/bin/chromium ]; then
+          if [ -f /snap/bin/chromium ]; then
+              # place it at /usr/bin so the pi-ext-read-website extension
+              # does not need to look for it.
+              ln -sfT /snap/bin/chromium /usr/bin/chromium
+          fi
+      fi
+      
+      # install all the things required for mesa and Vulkan:
+      apt-get install -y \
+          glslang-tools \
+          libdrm-dev \
+          libvulkan1 \
+          mesa-utils \
+          vulkan-tools
+      
+      apt-get build-dep -y mesa
+      
+      # other tools not from apt:
+      wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/local/bin/yq
+      chmod +x /usr/local/bin/yq
+      chown 0755 /usr/local/bin/yq
+
+      cat >/etc/sysctl.d/99-lima-pi.conf <<'SYSCTL'
+      net.ipv4.ip_forward=1
+      SYSCTL
+
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eu
+      mkdir -p /opt/mesa/build
+      mkdir -p /opt/mesa/patches
+
+  - mode: data
+    path: /etc/sysctl.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      #
+      # /etc/sysctl.conf - Configuration file for setting system variables
+      # See /etc/sysctl.d/ for additional system variables.
+      # See sysctl.conf (5) for information.
+      #
+
+      #kernel.domainname = example.com
+
+      # Uncomment the following to stop low-level messages on console
+      #kernel.printk = 3 4 1 3
+
+      ###################################################################
+      # Functions previously found in netbase
+      #
+
+      # Uncomment the next two lines to enable Spoof protection (reverse-path filter)
+      # Turn on Source Address Verification in all interfaces to
+      # prevent some spoofing attacks
+      #net.ipv4.conf.default.rp_filter=1
+      #net.ipv4.conf.all.rp_filter=1
+
+      # Uncomment the next line to enable TCP/IP SYN cookies
+      # See http://lwn.net/Articles/277146/
+      # Note: This may impact IPv6 TCP sessions too
+      #net.ipv4.tcp_syncookies=1
+
+      # Uncomment the next line to enable packet forwarding for IPv4
+      #net.ipv4.ip_forward=1
+
+      # Uncomment the next line to enable packet forwarding for IPv6
+      #  Enabling this option disables Stateless Address Autoconfiguration
+      #  based on Router Advertisements for this host
+      #net.ipv6.conf.all.forwarding=1
+
+
+      ###################################################################
+      # Additional settings - these settings can improve the network
+      # security of the host and prevent against some network attacks
+      # including spoofing attacks and man in the middle attacks through
+      # redirection. Some network environments, however, require that these
+      # settings are disabled so review and enable them as needed.
+      #
+      # Do not accept ICMP redirects (prevent MITM attacks)
+      #net.ipv4.conf.all.accept_redirects = 0
+      #net.ipv4.conf.default.accept_redirects = 0
+      # _or_
+      # Accept ICMP redirects only for gateways listed in our default
+      # gateway list (enabled by default)
+      # net.ipv4.conf.all.secure_redirects = 1
+      #
+      # Do not send ICMP redirects (we are not a router)
+      #net.ipv4.conf.all.send_redirects = 0
+      #
+      # Log Martian Packets
+      #net.ipv4.conf.all.log_martians = 1
+      #
+
+      ###################################################################
+      # Magic system request Key
+      # 0=disable, 1=enable all, >1 bitmask of sysrq functions
+      # See https://www.kernel.org/doc/html/latest/admin-guide/sysrq.html
+      # for what other values do
+      #kernel.sysrq=438
+
+      ###################################################################
+      # Defaults ended above.
+      ###################################################################
+      # Custom overrides for the pi dev VM:
+      ###################################################################
+      fs.inotify.max_queued_events = 1048576
+      fs.inotify.max_user_instances = 1048576
+      fs.inotify.max_user_watches = 1048576
+      kern.maxfiles=100000
+      kern.maxfilesperproc=100000
+      net.ipv4.conf.default.rp_filter=1
+      net.ipv4.conf.all.rp_filter=1
+      net.ipv4.ip_forward=1
+      vm.max_map_count = 262144
+
+  - mode: data
+    path: /etc/security/limits.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # /etc/security/limits.conf
+      #
+      #This file sets the resource limits for the users logged in via PAM.
+      #It does not affect resource limits of the system services.
+      #
+      #Also note that configuration files in /etc/security/limits.d directory,
+      #which are read in alphabetical order, override the settings in this
+      #file in case the domain is the same or more specific.
+      #That means, for example, that setting a limit for wildcard domain here
+      #can be overridden with a wildcard setting in a config file in the
+      #subdirectory, but a user specific setting here can be overridden only
+      #with a user specific setting in the subdirectory.
+      #
+      #Each line describes a limit for a user in the form:
+      #
+      #<domain>        <type>  <item>  <value>
+      #
+      #Where:
+      #<domain> can be:
+      #        - a user name
+      #        - a group name, with @group syntax
+      #        - the wildcard *, for default entry
+      #        - the wildcard %, can be also used with %group syntax,
+      #                 for maxlogin limit
+      #        - NOTE: group and wildcard limits are not applied to root.
+      #          To apply a limit to the root user, <domain> must be
+      #          the literal username root.
+      #
+      #<type> can have the two values:
+      #        - "soft" for enforcing the soft limits
+      #        - "hard" for enforcing hard limits
+      #
+      #<item> can be one of the following:
+      #        - core - limits the core file size (KB)
+      #        - data - max data size (KB)
+      #        - fsize - maximum filesize (KB)
+      #        - memlock - max locked-in-memory address space (KB)
+      #        - nofile - max number of open file descriptors
+      #        - rss - max resident set size (KB)
+      #        - stack - max stack size (KB)
+      #        - cpu - max CPU time (MIN)
+      #        - nproc - max number of processes
+      #        - as - address space limit (KB)
+      #        - maxlogins - max number of logins for this user
+      #        - maxsyslogins - max number of logins on the system
+      #        - priority - the priority to run user process with
+      #        - locks - max number of file locks the user can hold
+      #        - sigpending - max number of pending signals
+      #        - msgqueue - max memory used by POSIX message queues (bytes)
+      #        - nice - max nice priority allowed to raise to values: [-20, 19]
+      #        - rtprio - max realtime priority
+      #        - chroot - change root to directory (Debian-specific)
+      #
+      #<domain>      <type>  <item>         <value>
+      #
+
+      #*               soft    core            0
+      #root            hard    core            100000
+      #*               hard    rss             10000
+      #@student        hard    nproc           20
+      #@faculty        soft    nproc           20
+      #@faculty        hard    nproc           50
+      #ftp             hard    nproc           0
+      #ftp             -       chroot          /ftp
+      #@student        -       maxlogins       4
+
+      ###################################################################
+      #Custom overrides for the pi dev VM.
+      ###################################################################
+      *       soft    nofile  1024 unset
+      *       hard    nofile  1048576 unset
+      root    soft    nofile  1024 unset
+      root    hard    nofile  1048576 unset
+      *       soft    memlock 1048576 unset
+      *       hard    memlock 1048576 unset
+
+      # End of file
+
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eu
+      bootstrap_dir=$(find / -name pi-lima.bootstrap -type d)
+      if [ -n "${bootstrap_dir}" ]; then
+        mkdir -p /opt/pi-lima/bootstrap
+        ln -sfT "${bootstrap_dir}" /opt/pi-lima/pi-lima.bootstrap
+      fi
+
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eu
+
+      # build and install Mesa:
+      cd /opt/mesa/build
+      git clone -v https://gitlab.freedesktop.org/mesa/mesa.git .
+      git checkout "mesa-$PARAM_MESA_VERSION"
+
+      # When no patch file, build without a patch using upstream Mesa.
+      if [ -f /opt/pi-lima/pi-lima.bootstrap/mesa.$PARAM_MESA_VERSION.krunkit-16k.patch ]; then
+        git apply "/opt/pi-lima/pi-lima.bootstrap/mesa.$PARAM_MESA_VERSION.krunkit-16k.patch"
+      else
+        echo >&2 "no git patch to apply for Mesa version $PARAM_MESA_VERSION"
+      fi
+
+      meson setup "build-krunkit-$PARAM_MESA_VERSION" \
+        --prefix="/opt/mesa/venus" \
+        --libdir=lib \
+        --buildtype=debugoptimized \
+        -Dvulkan-drivers=virtio \
+        -Dgallium-drivers=[] \
+        -Dplatforms=[] \
+        -Dglx=disabled \
+        -Degl=disabled \
+        -Dgles1=disabled \
+        -Dgles2=disabled
+      meson compile -C "build-krunkit-$PARAM_MESA_VERSION"
+      meson install -C "build-krunkit-$PARAM_MESA_VERSION"
+
+      cat >>/etc/environment.d/99-lima-pi.conf <<'EOF'
+      VK_DRIVER_FILES=/opt/mesa/venus/share/vulkan/icd.d/virtio_icd.aarch64.json
+      EOF
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eu
+
+      sudo mkdir -p /code
+      sudo install -d -m 0644 -o "$(whoami)" -g "$(whoami)" /code
+
+      cat >"${HOME}/.mesa-env" <<'EOF'
+      export VK_DRIVER_FILES=/opt/mesa/venus/share/vulkan/icd.d/virtio_icd.aarch64.json
+      EOF
+      cat >"${HOME}/.pi-env" <<'EOF'
+      export PI_CODING_AGENT_DIR="$HOME/.local/share/pi/agent"
+      EOF
+
+      grep -qF '. "${HOME}/.mesa-env"' "${HOME}/.profile" 2>/dev/null ||
+        echo '. "${HOME}/.mesa-env"' >> "${HOME}/.profile"
+      grep -qF '. "${HOME}/.pi-env"' "${HOME}/.profile" 2>/dev/null ||
+        echo '. "${HOME}/.pi-env"' >> "${HOME}/.profile"
+      
+      grep -qF '. "${HOME}/.mesa-env"' "${HOME}/.bashrc" 2>/dev/null ||
+        echo '. "${HOME}/.mesa-env"' >> "${HOME}/.bashrc"
+      grep -qF '. "${HOME}/.pi-env"' "${HOME}/.bashrc" 2>/dev/null ||
+        echo '. "${HOME}/.pi-env"' >> "${HOME}/.bashrc"
+      
+      mkdir -p "${HOME}/.local/share/pi/agent"
+
+      # trust the default pi project:
+      cat >"${HOME}/.local/share/pi/agent/settings.json" <<'EOF'
+      {
+        "defaultProjectTrust": "always"
+      }
+      EOF
+
+      cat >>"${HOME}/.bashrc" <<'EOF'
+      # 
+      # Find all lima-like mounts:
+      for line in $(findmnt -t virtiofs,9p,fuse.sshfs | grep virtiofs | awk '{print $1}'); do
+
+        if [ -n "${HARNESS_WORK_DIR}" ]; then
+          if [[ "${line}" == "${HARNESS_WORK_DIR}" ]]; then
+            ln -sfT "${HARNESS_WORK_DIR}" /code
+          fi
+        fi
+
+        # Handle .../.config/git directory
+        # --------------------------------
+        # By default VM's ssh takes the user to the last mount, when the VM starts from 
+        # a directory which is a root of the project, with git repository configured,
+        # that's where the agent will run. For the agent to be able to commit 
+        # as the repository user.name and user.email, used git configuration from 
+        # this mount, must be available, maybe not used but it's not known ahead of time.
+        # It needs to be checked one way or another.
+        # 
+        # So in that case, this script runs in pwd of current working tree.
+        #
+        # When that happens, under this condition, this program will look
+        # at git config and find out, which other files have to be copied.
+        #
+        # Now why not simply ln -sfT "/Users/$(whoami).guest/.config/git" "${HOME}/.config/git"?
+        # At least at the moment of writing, this results in git eventually running into 
+        # the following problem: 
+        # 
+        #      warning: unable to access 
+        #      '/home/user.guest/.config/git/.private.inc': Too many open files
+        # 
+        # The agent commits for so long, and then suddenly runs into this problem.
+        # The only way to resolve this is a restart of the VM.
+        # 
+        # I was not able to find the cause of this problem. I think the problem is related
+        # to continuous access via shared-mount resource.
+        # 
+        # So, in order to work around, files have to be copied. But only files which are relevant. 
+        # Think of a multi-user git configuration. Based on some includeif conditions, a different
+        # committer is used. The user may have multiple configs available, but VM's git 
+        # should not have by default.
+        # 
+        # Summary: just relevant files.
+        # 
+        # The idea here is to achieve the following:
+        #  - preconditions:
+        #   * current mount must be for .../.config/git, no / at the ned
+        #   * current working directory is a working tree
+        #   * our "${HOME}/.config/git/config" does not exist
+        #   * their "${HOME}/.config/git/config" exists
+        #   
+        #  - the user can mount their "${HOME}/.config/git" directory
+        #  - when they do, the program checks if their "${HOME}/.config/git/config" exists 
+        #    in VM's mount, if yes, it gets copied to the local one
+        #  - when there is, copy it to our "${HOME}/.config/git"
+        #  - then use that config to find out which other files from host "${HOME}/.config/git"
+        #    have to be copied to ours for that repository to work
+        #  - copy all required files, and nothing else
+        #    
+        # The end result is that commits work fine and because host's git config files
+        # aren't touched on every git commit, the problem can be hopefully.
+
+        if [[ "${line}" == */.config/git ]]; then
+          if [ -f "$(pwd)/.git/config" ]; then
+            if [ ! -f "${HOME}/.config/git/config" ]; then
+              if [ -f "${line}/config" ]; then
+                mkdir -p "${HOME}/.config/git"
+                cp -v "${line}/config" "${HOME}/.config/git/config"
+                # strip the suffix from the line to get the "temp HOME"
+                temp_home="$(echo "${line}" | sed 's!/.config/git!!')"
+                set +e
+                other_files=$(HOME="${temp_home}" git config \
+                  --includes \
+                  --show-origin \
+                  --show-scope \
+                  --list \
+                  | grep "file:${temp_home}" \
+                  | grep -v "file:${temp_home}/.config/git/config" \
+                  | awk '{print $2}' | sort | uniq)
+                set -e
+                for other_file in ${other_files}; do
+                  # strip the prefix from file:/full/path/to/the/file
+                  source_file=$(echo "${other_file}" | sed 's!file:!!')
+                  # the target is the source_file with temp_home prefix
+                  # removed, and the result appended to our HOME.
+                  # Example for temp_home=/Users/mac-user in the VM:
+                  #   
+                  #   file:/Users/mac-user/.config/git/.private.inc
+                  #   /Users/mac-user/.config/git/.private.inc
+                  #   /home/mac-user.guest/.config/git + /.config/git/.private.inc
+                  #    = /home/mac-user.guest/.config/git/.config/git/.private.inc
+                  #   
+                  target_file="${HOME}$(echo "${source_file}" | sed 's!'${temp_home}'!!')"
+                  cp -v "${source_file}" "${target_file}"
+                done
+              fi
+            fi
+          fi
+        fi
+
+        # Handle .../.pi/agent directory:
+        if [[ "${line}" == */.pi/agent ]]; then
+
+          # If we have models.json file under that Lima mount ...
+          if [ -f "${line}/models.json" ]; then
+            # ... and we don't have our local models.json yet ...
+            if [ ! -f "${PI_CODING_AGENT_DIR}/models.json" ]; then
+              # ... link it because that's the one the user wants to use.
+              ln -sfT "${line}/models.json" "${PI_CODING_AGENT_DIR}/models.json"
+            fi
+            if test -h "${PI_CODING_AGENT_DIR}/models.json"; then
+              # If local models.json is a link, use the link, do nothing.
+              echo >>/dev/null "Found mounted '${line}/models.json', relinking to '${PI_CODING_AGENT_DIR}/models.json'"
+            else
+              # Otherwise use the local file directly.
+              echo >/dev/null "[WARN] Found mounted '${line}/models.json' but '${PI_CODING_AGENT_DIR}/models.json' is a file, not a link, will not relink."
+            fi
+          fi
+
+          # If we have prompts/ directory under that Lima mount ...
+          if [ -d "${line}/prompts" ]; then
+            # ... and we don't have our local prompts/ yet ...
+            if [ ! -d "${PI_CODING_AGENT_DIR}/prompts" ]; then
+              # ... link it because that's the one the user wants to use.
+              ln -sfT "${line}/prompts" "${PI_CODING_AGENT_DIR}/prompts"
+            fi
+            if test -h "${PI_CODING_AGENT_DIR}/prompts"; then
+              # If local prompts/ is a link, use the link, do nothing.
+              echo >>/dev/null "Found mounted '${line}/prompts', using '${PI_CODING_AGENT_DIR}/prompts => ${line}/prompts'"
+            else
+              # If local models.json is a link, use the link, do nothing.
+              echo >/dev/null "[WARN] Found mounted '${line}/prompts' but '${PI_CODING_AGENT_DIR}/prompts' is a directory, not a link, will not relink."
+            fi
+          fi
+
+          # If we have sessions/ directory under that Lima mount ...
+          if [ -d "${line}/sessions" ]; then
+            # ... and we don't have our local sessions/ yet ...
+            if [ ! -d "${PI_CODING_AGENT_DIR}/sessions" ]; then
+              # ... link it because that's the one the user wants to use.
+              ln -sfT "${line}/sessions" "${PI_CODING_AGENT_DIR}/sessions"
+            fi
+            if test -h "${PI_CODING_AGENT_DIR}/sessions"; then
+              # If local sessions/ is a link, use the link, do nothing.
+              echo >>/dev/null "Found mounted '${line}/sessions', using '${PI_CODING_AGENT_DIR}/sessions => ${line}/sessions'"
+            else
+              # If local models.json is a link, use the link, do nothing.
+              echo >/dev/null "[WARN] Found mounted '${line}/sessions' but '${PI_CODING_AGENT_DIR}/sessions' is a directory, not a link, will not relink."
+            fi
+          fi
+
+        fi
+
+        # Capture committer identity for the current repository.
+        # -----------------------------------------------------------------
+        # The harness reads ~/.config/git/current_committer instead of calling
+        # `git config user.name` / `git config user.email` on every git
+        # operation. This block runs after all */.config/git mounts have been
+        # processed above, so any host git config files have already been
+        # copied into the VM and `git config` here resolves to the right
+        # values for the repository the VM started in. Done once per shell
+        # startup, only if the file does not exist yet — the harness can
+        # overwrite or delete the file later, and a subsequent login will
+        # then re-capture.
+        if [ ! -f "${HOME}/.config/git/current_committer" ]; then
+          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            _name="$(git config user.name)"
+            _email="$(git config user.email)"
+            if [ -n "${_name}" ] && [ -n "${_email}" ]; then
+              mkdir -p "${HOME}/.config/git"
+              printf '%s <%s>\n' "${_name}" "${_email}" \
+                > "${HOME}/.config/git/current_committer"
+            fi
+          fi
+        fi
+
+      done
+      EOF
+
+      # install Node using nvm:
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.7/install.sh | bash
+      . "${HOME}/.nvm/nvm.sh"
+      nvm install "$PARAM_NODE_VERSION"
+      nvm alias default "$PARAM_NODE_VERSION"
+      nvm use "$PARAM_NODE_VERSION"
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eu
+
+      sudo mkdir -p /opt/pi-agent
+      sudo install -d -m 0755 -o "$(whoami)" -g "$(whoami)" /opt/pi-agent
+      sudo mkdir -p /opt/pi-user-env
+      sudo install -d -m 0755 -o "$(whoami)" -g "$(whoami)" /opt/pi-user-env
+      cd /opt/pi-agent
+      git clone "${PARAM_PI_REPOSITORY}" .
+      git checkout "${PARAM_PI_VERSION}"
+
+      . "${HOME}/.nvm/nvm.sh"
+      npm install
+      npm run build
+
+      # pi wrapper (shell) — strips shell-session env vars before exec'ing
+      # the Node entry point. The intent is environment hygiene: pi's
+      # subprocesses do not inherit the invoking user's shell history,
+      # init-file sourcing, or prompt hooks. Pi retains full filesystem
+      # access inside the VM; this is not a security boundary.
+      cat >/opt/pi-agent/packages/coding-agent/dist/pi <<'EOF'
+      #!/bin/sh
+      unset HISTFILE BASH_ENV ENV PROMPT_COMMAND
+      exec /opt/pi-agent/packages/coding-agent/dist/pi-node "$@"
+      EOF
+
+      # pi entry point (Node.js) — the actual agent runtime.
+      cat >/opt/pi-agent/packages/coding-agent/dist/pi-node <<'EOF'
+      #!/usr/bin/env node
+      // SPDX-License-Identifier: Apache-2.0
+      /**
+       * CLI entry point for the refactored coding agent.
+       * Uses main.ts with AgentSession and new mode modules.
+       *
+       * Test with: npx tsx src/cli-new.ts [args...]
+       */
+      process.title = "pi";
+      process.emitWarning = (() => { });
+      import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
+      import { main } from "./main.js";
+      setGlobalDispatcher(new EnvHttpProxyAgent());
+      main(process.argv.slice(2));
+      EOF
+
+      chmod u+x /opt/pi-agent/packages/coding-agent/dist/pi
+      chmod u+x /opt/pi-agent/packages/coding-agent/dist/pi-node
+      sudo ln -sfT /opt/pi-agent/packages/coding-agent/dist/pi /usr/local/bin/pi
+
+      # install pi extensions
+      pi install git:https://github.com/combust-labs/pi-ext-read-website

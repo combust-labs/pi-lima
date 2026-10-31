@@ -1,0 +1,22 @@
+# krunkit is the VM backend.
+vmType: krunkit
+
+# Required for KVM inside this VM.
+nestedVirtualization: true
+
+arch: aarch64
+
+cpus: 8
+
+memory: "32GiB"
+
+disk: "100GiB"
+
+images:
+  - location: "file:///Users/radek/dev/radekg/pi-lima/ubuntu-24.04-lima-arm64.qcow2"
+    arch: "aarch64"
+
+# Make the project directory visible inside the VM.
+mounts:
+  - location: "~"
+    writable: true

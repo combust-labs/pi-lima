@@ -1,0 +1,3 @@
+.DS_Store
+bin/image/pi-lima.bootstrap/custom/**
+!bin/image/pi-lima.bootstrap/custom/.gitkeep
