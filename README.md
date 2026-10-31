@@ -183,6 +183,7 @@ pi-lima/
     │   ├── install-krunkit.sh
     │   ├── install-qemu.sh
     │   ├── uninstall-krunkit.sh
+    │   ├── cleanup.sh
     │   └── fix-virglrenderer.sh
     ├── image/                           image builder
     │   ├── pi-builder.sh
@@ -381,6 +382,17 @@ When in doubt, fully uninstall and reinstall the krunkit stack:
 
 ```sh
 ./bin/host/macos/uninstall-krunkit.sh
+./bin/host/macos/install-krunkit.sh
+```
+
+### Deep-clean the krunkit Homebrew state
+
+`cleanup.sh` removes the krunkit-related Homebrew state in one shot: the binaries (`krunkit`, `libkrun`, `libkrunfw`, `virglrenderer`), both taps (`libkrun/krun`, `slp/krun`), the per-formula trusts on both taps, and the brew cache. Use it whenever a stale tap or trust is blocking a fresh `install-krunkit.sh` run, or when a full reset of the krunkit stack is needed.
+
+For a full reset:
+
+```sh
+./bin/host/macos/cleanup.sh
 ./bin/host/macos/install-krunkit.sh
 ```
 
